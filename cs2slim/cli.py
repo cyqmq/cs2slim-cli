@@ -29,7 +29,7 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import argparse
 import json

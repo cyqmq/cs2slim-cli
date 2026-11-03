@@ -38,13 +38,13 @@ jobs:
       - name: Build wheel and sdist
         run: python -m build
       - name: Build zipapp
-        run: bash scripts/make_zipapp.sh dist
+        run: bash scripts/make_zipapp.sh release-assets
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" \
-            dist/*.whl dist/*.tar.gz dist/cs2slim.pyz \
+            dist/*.whl dist/*.tar.gz release-assets/cs2slim.pyz \
             scripts/get-cs2slim.sh scripts/get-cs2slim.ps1 \
             --generate-notes
       - name: Publish to PyPI (trusted publishing / OIDC)

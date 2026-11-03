@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cs2slim"
-version = "1.0.1"
+version = "1.0.2"
 description = "CS2 精简专用服务器 CLI：一键拉取/拼装/启动精简服务端，含版本自检与升级"
 readme = "README.md"
 requires-python = ">=3.8"
