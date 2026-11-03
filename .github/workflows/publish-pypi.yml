@@ -3,12 +3,19 @@ name: publish-pypi
 # 自动发布：push 形如 vX.Y.Z 的 tag 时触发。
 #  - 构建 wheel + sdist（python -m build）
 #  - 构建单文件 zipapp（cs2slim.pyz）
-#  - 发布到 PyPI（需配置 Secret: PYPI_TOKEN = PyPI API token；未配置则跳过）
 #  - 创建 GitHub Release（附带 wheel/sdist/pyz/安装脚本）
+#  - 发布到 PyPI（OIDC 可信发布，无需 token）
 #
-# 配置：
-#   仓库 Settings -> Secrets and variables -> Actions -> New repository secret
-#   Name: PYPI_TOKEN   Value: <PyPI 账号 API token（__token__ 发布）>
+# PyPI 可信发布（Trusted Publisher）配置（无需任何 Secret/token）：
+#   1. 打开 PyPI 项目（首次发布前为"待认领"）：https://pypi.org/manage/project/cs2slim/
+#      （若项目不存在，先注册/创建，或用"待发布者"方式首次自动创建）
+#   2. Project -> Settings -> Publishing -> Add trusted publisher:
+#        PyPI project name : cs2slim
+#        Owner             : cyqmq
+#        Repository        : cs2slim-cli
+#        Workflow name     : publish-pypi.yml
+#        Environment       : (留空)
+#   3. push 一个 v* tag 即自动发布到 PyPI
 on:
   push:
     tags:
@@ -16,6 +23,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # OIDC：用于 PyPI 可信发布（无需 API token）
 
 jobs:
   build-and-publish:
@@ -26,20 +34,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install build tools
-        run: pip install --upgrade build twine
+        run: pip install --upgrade build
       - name: Build wheel and sdist
         run: python -m build
       - name: Build zipapp
         run: bash scripts/make_zipapp.sh dist
-      - name: Publish to PyPI
-        env:
-          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          if [ -z "$PYPI_TOKEN" ]; then
-            echo "PYPI_TOKEN 未配置，跳过 PyPI 发布（仓库 Settings -> Secrets 添加后，下个 tag 自动发布）"
-          else
-            python -m twine upload --non-interactive --username __token__ --password "$PYPI_TOKEN" dist/*.whl dist/*.tar.gz
-          fi
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,3 +47,8 @@ jobs:
             dist/*.whl dist/*.tar.gz dist/cs2slim.pyz \
             scripts/get-cs2slim.sh scripts/get-cs2slim.ps1 \
             --generate-notes
+      - name: Publish to PyPI (trusted publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # 无需 __token__：GitHub Actions 通过 OIDC 向 PyPI 证明身份

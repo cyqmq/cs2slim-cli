@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/cyqmq/cs2slim-cli/main/scripts/get-
 python3 scripts/make_zipapp.sh && ./cs2slim.pyz --help
 ```
 
-> PyPI 自动发布：仓库已配置 `.github/workflows/publish-pypi.yml`，push 形如 `vX.Y.Z` 的 tag 时自动构建并发布到 PyPI + 创建 GitHub Release。需在仓库 Settings -> Secrets 添加 `PYPI_TOKEN`（PyPI API token）。
+> PyPI 自动发布（OIDC 可信发布，无需 token）：仓库已配置 `.github/workflows/publish-pypi.yml`，push 形如 `vX.Y.Z` 的 tag 时自动构建、发布到 PyPI 并创建 GitHub Release。需在 PyPI 侧登记 Trusted Publisher：Project → Settings → Publishing → Add trusted publisher（PyPI project: `cs2slim`，Owner: `cyqmq`，Repository: `cs2slim-cli`，Workflow: `publish-pypi.yml`，Environment: 留空）。
 
 ## 使用
 
