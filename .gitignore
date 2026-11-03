@@ -1,0 +1,8 @@
+cs2-build/
+__pycache__/
+*.pyc
+*.pyz
+*.part
+*.zip
+*.tar.gz
+slim.yaml
