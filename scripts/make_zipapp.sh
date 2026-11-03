@@ -13,6 +13,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 OUT_DIR="${1:-.}"
+mkdir -p "$OUT_DIR"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
