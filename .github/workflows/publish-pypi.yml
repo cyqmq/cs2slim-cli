@@ -43,10 +43,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            dist/*.whl dist/*.tar.gz release-assets/cs2slim.pyz \
-            scripts/get-cs2slim.sh scripts/get-cs2slim.ps1 \
-            --generate-notes
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} 已存在，跳过"
+          else
+            gh release create "${{ github.ref_name }}" \
+              dist/*.whl dist/*.tar.gz release-assets/cs2slim.pyz \
+              scripts/get-cs2slim.sh scripts/get-cs2slim.ps1 \
+              --generate-notes
+          fi
       - name: Publish to PyPI (trusted publishing / OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
