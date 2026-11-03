@@ -6,3 +6,6 @@ __pycache__/
 *.zip
 *.tar.gz
 slim.yaml
+build/
+dist/
+*.egg-info/

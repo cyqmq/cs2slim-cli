@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs2slim"
+version = "1.0.0"
+description = "CS2 精简专用服务器 CLI：一键拉取/拼装/启动精简服务端，含版本自检与升级"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "cyqmq" }]
+keywords = ["cs2", "counter-strike", "dedicated-server", "slim", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Games/Entertainment",
+]
+
+[project.urls]
+Homepage = "https://github.com/cyqmq/cs2slim-cli"
+Repository = "https://github.com/cyqmq/cs2slim-cli"
+
+[project.scripts]
+cs2slim = "cs2slim:main"
+
+[tool.setuptools.packages.find]
+include = ["cs2slim*"]
+
+[tool.setuptools.package-data]
+cs2slim = ["registry/*.json", "state/*.json", "slim.yaml.example"]

@@ -1,0 +1,50 @@
+name: publish-pypi
+
+# 自动发布：push 形如 vX.Y.Z 的 tag 时触发。
+#  - 构建 wheel + sdist（python -m build）
+#  - 构建单文件 zipapp（cs2slim.pyz）
+#  - 发布到 PyPI（需配置 Secret: PYPI_TOKEN = PyPI API token；未配置则跳过）
+#  - 创建 GitHub Release（附带 wheel/sdist/pyz/安装脚本）
+#
+# 配置：
+#   仓库 Settings -> Secrets and variables -> Actions -> New repository secret
+#   Name: PYPI_TOKEN   Value: <PyPI 账号 API token（__token__ 发布）>
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: pip install --upgrade build twine
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Build zipapp
+        run: bash scripts/make_zipapp.sh dist
+      - name: Publish to PyPI
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          if [ -z "$PYPI_TOKEN" ]; then
+            echo "PYPI_TOKEN 未配置，跳过 PyPI 发布（仓库 Settings -> Secrets 添加后，下个 tag 自动发布）"
+          else
+            python -m twine upload --non-interactive --username __token__ --password "$PYPI_TOKEN" dist/*.whl dist/*.tar.gz
+          fi
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/*.whl dist/*.tar.gz dist/cs2slim.pyz \
+            scripts/get-cs2slim.sh scripts/get-cs2slim.ps1 \
+            --generate-notes

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cs2slim - CS2 精简服务端 配置驱动 CLI（主仓库入口）
+cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 
 多仓库架构:
-  - 本仓库 (cs2-slim)   : 核心配方 + 入口脚本 + 组件注册表
-  - cs2-slim-maps       : 地图组件仓库 (filelist 片段 + 预构建包)
-  - cs2-slim-features   : 功能组件仓库 (bots/gotv 等)
+  - 本仓库 (cs2slim-cli) : CLI + 一键安装脚本（用户侧）
+  - cs2-slim-replica     : 构建仓库（核心配方 + 组件注册表权威来源）
+  - cs2-slim-maps        : 地图组件仓库 (filelist 片段 + 预构建包)
+  - cs2-slim-features    : 功能组件仓库 (bots/gotv 等)
 
 子命令:
   init      生成 slim.yaml 配置模板
@@ -15,18 +16,20 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（主仓库入口）
   build     组装精简树 (核心 + 选配地图)
   package   打包
   run       启动服务端
+  prebuilt  预构建模式（拉取 Release 包自动拼装）
+  status    查看状态（含版本自检）
+  upgrade   检查附属仓库预构建版本并升级
+  clean     清理下载缓存
 
 示例:
-  python cs2slim.py init
-  python cs2slim.py download --config slim.yaml
-  python cs2slim.py download --platform win64 --maps de_dust2,de_mirage --features bots
-  python cs2slim.py extract --config slim.yaml
-  python cs2slim.py build  --config slim.yaml
-  python cs2slim.py package --config slim.yaml --format zip
-  python cs2slim.py run    --config slim.yaml
+  python -m cs2slim.cli init
+  python -m cs2slim.cli download --config slim.yaml
+  cs2slim prebuilt --platform linux --maps de_dust2,de_mirage --features bots
 
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
+
+__version__ = "1.0.0"
 
 import argparse
 import json
@@ -57,9 +60,12 @@ def _extract_zipapp_resources():
     if not zip_path:
         return None
     import hashlib
-    h = hashlib.md5(zip_path.encode("utf-8")).hexdigest()[:8]
+    st = os.stat(zip_path)
+    # 缓存键含路径+mtime+size：重建的 pyz 不会复用旧布局缓存
+    h = hashlib.md5(f"{zip_path}|{st.st_mtime_ns}|{st.st_size}".encode("utf-8")).hexdigest()[:8]
     cache = os.path.join(os.path.expanduser("~"), ".cache", "cs2slim", h)
-    if os.path.exists(os.path.join(cache, ".extracted")):
+    data_dir = os.path.join(cache, "cs2slim")
+    if os.path.exists(os.path.join(cache, ".extracted")) and os.path.exists(os.path.join(data_dir, "registry")):
         return cache
     os.makedirs(cache, exist_ok=True)
     with zipfile.ZipFile(zip_path) as z:
@@ -69,7 +75,8 @@ def _extract_zipapp_resources():
 
 
 _ZIPAPP_RES = _extract_zipapp_resources()
-CLI_DIR = _ZIPAPP_RES or os.path.dirname(os.path.abspath(__file__))
+# zipapp 解包后数据在 <cache>/cs2slim/；源码/pip 包模式为包目录自身
+CLI_DIR = os.path.join(_ZIPAPP_RES, "cs2slim") if _ZIPAPP_RES else os.path.dirname(os.path.abspath(__file__))
 CORE_DIR = os.path.join(CLI_DIR, "core")
 SCRIPTS_DIR = os.path.join(CLI_DIR, "scripts")
 REGISTRY_DIR = os.path.join(CLI_DIR, "registry")
@@ -1287,7 +1294,7 @@ def read_buildid():
 def main():
     # --version 在 subparsers required=True 之前拦截，避免无子命令时报错
     if "--version" in sys.argv:
-        print(f"cs2slim (cs2-slim-replica)  CS2 buildid: {read_buildid()}")
+        print(f"cs2slim {__version__}  CS2 buildid: {read_buildid()}")
         print(f"python: {sys.version.split()[0]}  platform: {detect_platform()}")
         return
     ap = argparse.ArgumentParser(description="cs2slim - CS2 精简服务端配置驱动 CLI")

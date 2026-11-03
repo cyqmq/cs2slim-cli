@@ -19,10 +19,8 @@ trap 'rm -rf "$STAGE"' EXIT
 echo "== 构建 zipapp (cs2slim.pyz) =="
 mkdir -p "$STAGE/app"
 
-# 1. CLI 入口 + 数据目录（core/registry/scripts/state + 模板）
-cp cs2slim.py "$STAGE/app/"
-cp -r core registry scripts state "$STAGE/app/"
-cp slim.yaml.example "$STAGE/app/"
+# 1. 打包 cs2slim/ 包（cli + registry/state + 模板，包数据随包）
+cp -r cs2slim "$STAGE/app/cs2slim"
 
 # 2. __main__.py 入口（zipapp 启动即运行 CLI）
 printf 'from cs2slim import main\nmain()\n' > "$STAGE/app/__main__.py"

@@ -4,21 +4,26 @@ CS2 精简服务端命令行工具（用户侧）。
 
 本仓库是 **cs2-slim-replica**（纯自动构建仓库）的用户侧工具仓库，提供：
 
-- `cs2slim.py`：CLI（`init` / `download` / `extract` / `build` / `run` / `package` / `all` / `prebuilt` / `status` / `upgrade` / `clean`）
+- `cs2slim/`：CLI 包（pip 可装；`cs2slim` 命令，子命令 `init` / `download` / `extract` / `build` / `run` / `package` / `all` / `prebuilt` / `status` / `upgrade` / `clean`）
 - `scripts/get-cs2slim.sh` / `get-cs2slim.ps1`：一键安装（拉取 Release 包 + 预构建）
 - `scripts/prebuilt.sh`：纯 bash 预构建模式（零 Python，供无 Python 环境 / CI）
 - `scripts/make_zipapp.sh`：构建 `cs2slim.pyz`（单文件 zipapp 可执行包）
-- `registry/`：组件目录本地副本（从 cs2-slim-replica 同步，供离线回退）
+- `cs2slim/registry/`：组件目录本地副本（从 cs2-slim-replica 同步，供离线回退）
 
 ## 安装
 
 ```bash
-# Linux（curl 一行）
-curl -fsSL https://raw.githubusercontent.com/<owner>/cs2slim-cli/main/scripts/get-cs2slim.sh | bash
+# pip（PyPI，推荐）
+pip install cs2slim
 
-# 或走 pip / zipapp
-python3 cs2slim.py --help
+# Linux（curl 一行，免 pip）
+curl -fsSL https://raw.githubusercontent.com/cyqmq/cs2slim-cli/main/scripts/get-cs2slim.sh | bash
+
+# 或单文件 zipapp（Release 附带 / 本地构建）
+python3 scripts/make_zipapp.sh && ./cs2slim.pyz --help
 ```
+
+> PyPI 自动发布：仓库已配置 `.github/workflows/publish-pypi.yml`，push 形如 `vX.Y.Z` 的 tag 时自动构建并发布到 PyPI + 创建 GitHub Release。需在仓库 Settings -> Secrets 添加 `PYPI_TOKEN`（PyPI API token）。
 
 ## 使用
 
