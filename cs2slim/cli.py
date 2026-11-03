@@ -29,7 +29,7 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 import argparse
 import json
@@ -44,19 +44,23 @@ import urllib.request
 import zipfile
 
 
+def _zipapp_zip_path():
+    """返回当前以 zipapp 运行的 pyz 绝对路径；非 zipapp 模式返回 None。"""
+    mod_file = os.path.abspath(__file__)
+    for marker in ("cs2slim.pyz", ".pyz", ".zip"):
+        idx = mod_file.find(marker)
+        if idx != -1:
+            return mod_file[: idx + len(marker)]
+    return None
+
+
 def _extract_zipapp_resources():
     """zipapp 运行时引导：把内置数据目录解到缓存，返回可读目录；常规源码运行返回 None。
 
     当以单文件 cs2slim.pyz 运行时，__file__ 形如 '<path>/cs2slim.pyz/__main__.py'，
     数据文件在 zip 内无法直接 open()，首次运行解到 ~/.cache/cs2slim/<hash> 并复用。
     """
-    mod_file = os.path.abspath(__file__)
-    zip_path = None
-    for marker in ("cs2slim.pyz", ".pyz", ".zip"):
-        idx = mod_file.find(marker)
-        if idx != -1:
-            zip_path = mod_file[: idx + len(marker)]
-            break
+    zip_path = _zipapp_zip_path()
     if not zip_path:
         return None
     import hashlib
@@ -907,6 +911,100 @@ def _ver_cmp(a, b):
     return (ta > tb) - (ta < tb)
 
 
+# ---------------------------------------------------------------------------
+# CLI 自身版本自检 / 自升级（PyPI + GitHub Release）
+# ---------------------------------------------------------------------------
+def _pypi_latest(pkg="cs2slim"):
+    """查询 PyPI 最新版本；网络/不可用返回 None。"""
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/{pkg}/json", timeout=8) as r:
+            return json.loads(r.read().decode("utf-8")).get("info", {}).get("version")
+    except Exception:
+        return None
+
+
+def _gh_latest_tag(repo="cyqmq/cs2slim-cli"):
+    """查询 GitHub releases/latest 的 tag；网络/不可用返回 None。"""
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/releases/latest",
+            headers={"User-Agent": "cs2slim"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read().decode("utf-8")).get("tag_name")
+    except Exception:
+        return None
+
+
+def _cli_latest():
+    """CLI 最新版本：优先 PyPI，回退 GitHub release tag。"""
+    v = _pypi_latest()
+    if v:
+        return v
+    t = _gh_latest_tag()
+    return t.lstrip("vV") if t else None
+
+
+def _install_mode():
+    """返回安装方式：zipapp / pip / source。"""
+    if _zipapp_zip_path():
+        return "zipapp"
+    try:
+        import importlib.metadata as _md
+        _md.version("cs2slim")
+        return "pip"
+    except Exception:
+        return "source"
+
+
+def cmd_selfupdate(args, cfg):
+    cur = __version__
+    latest = _cli_latest()
+    print(f"当前 CLI 版本: {cur}")
+    print(f"最新版本    : {latest or '未知'}")
+    if not latest:
+        print("无法获取最新版本（网络或 PyPI/GitHub 不可用）")
+        return
+    if _ver_cmp(latest, cur) <= 0:
+        print("已是最新版本（无需升级）")
+        return
+    if not getattr(args, "yes", False):
+        ans = input(f"升级 CLI 到 {latest}？[y/N] ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("已取消")
+            return
+    mode = _install_mode()
+    print(f"安装方式: {mode}")
+    if mode == "pip":
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "cs2slim"],
+            cwd=os.getcwd(),
+        )
+        if r.returncode == 0:
+            print("升级完成（新版本下次运行生效）")
+        else:
+            sys.exit(f"pip 升级失败 (exit {r.returncode})，可手动执行: pip install -U cs2slim")
+    elif mode == "zipapp":
+        zip_path = _zipapp_zip_path()
+        if not zip_path:
+            sys.exit("无法定位当前 cs2slim.pyz")
+        tmp = zip_path + ".new"
+        download_file(
+            "https://github.com/cyqmq/cs2slim-cli/releases/latest/download/cs2slim.pyz",
+            tmp,
+            "下载新版 cs2slim.pyz",
+        )
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, zip_path)
+        print(f"已替换: {zip_path}")
+        print("新版本下次运行生效")
+    else:
+        print("检测到源码模式，请手动更新仓库并重装，例如:")
+        print("  git -C <仓库根> pull")
+        print("  pip install -U cs2slim")
+
+
 def _version_file(tree):
     return os.path.join(tree, ".cs2slim-version.json")
 
@@ -969,6 +1067,7 @@ def cmd_upgrade(args, cfg):
             updates.append((f"功能 {f}", v, feat_latest))
     if not updates:
         print("已是最新版本（无需升级）")
+        _cli_upgrade_hint()
         return
     print("发现可升级组件:")
     for label, cur, latest in updates:
@@ -1025,8 +1124,20 @@ def cmd_upgrade(args, cfg):
             _patch_gameinfo_for_addon(tree, "sharp", "ModSharp")
         # 更新版本文件（仅地图/功能分支）
         _write_version(tree, reg_core, reg_maps, reg_feat,
-                       resolve_maps(cfg), parse_csv(cfg.get("features") or []))
+                        resolve_maps(cfg), parse_csv(cfg.get("features") or []))
     print("升级完成")
+    _cli_upgrade_hint()
+
+
+def _cli_upgrade_hint():
+    """打印 CLI 自身更新提示（若有新版本）。"""
+    try:
+        latest = _cli_latest()
+    except Exception:
+        return
+    if latest and _ver_cmp(latest, __version__) > 0:
+        print(f"提示: CLI 有新版本 {__version__} -> {latest}，可执行 cs2slim selfupdate")
+
 
 
 def cmd_prebuilt(args, cfg):
@@ -1243,6 +1354,13 @@ def cmd_status(args, cfg):
             flag = "↑" if v and feat_latest != "?" and _ver_cmp(feat_latest, v) > 0 else ""
             print(f"  功能 {f:<12}: 已装 {v} / 最新 {feat_latest} {flag}")
         print("  提示: 出现 ↑ 表示可执行 upgrade 升级")
+        # CLI 自身版本自检
+        cli_latest = _cli_latest()
+        if cli_latest:
+            cli_flag = "↑" if _ver_cmp(cli_latest, __version__) > 0 else ""
+            print(f"  CLI      : 当前 {__version__} / 最新 {cli_latest} {cli_flag}")
+            if cli_flag:
+                print("  提示: CLI 有新版本，可执行 cs2slim selfupdate")
 
 
 def cmd_clean(args, cfg):
@@ -1374,6 +1492,11 @@ def main():
     p_up.add_argument("--yes", "-y", action="store_true", help="跳过确认自动升级")
     add_common(p_up)
     p_up.set_defaults(func=cmd_upgrade)
+
+    p_su = sub.add_parser("selfupdate", help="检查并升级 CLI 自身（PyPI/GitHub）")
+    p_su.add_argument("--yes", "-y", action="store_true", help="跳过确认自动升级")
+    add_common(p_su)
+    p_su.set_defaults(func=cmd_selfupdate)
 
     args = ap.parse_args()
 
