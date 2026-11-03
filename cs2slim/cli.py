@@ -29,7 +29,7 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 import argparse
 import json
@@ -73,6 +73,12 @@ def _extract_zipapp_resources():
         return cache
     os.makedirs(cache, exist_ok=True)
     with zipfile.ZipFile(zip_path) as z:
+        # 防 zip-slip（_safe_join 定义在后面，模块加载期无法调用，此处内联）
+        cache_real = os.path.realpath(cache)
+        for info in z.infolist():
+            target = os.path.realpath(os.path.join(cache_real, info.filename))
+            if target != cache_real and not target.startswith(cache_real + os.sep):
+                raise ValueError(f"非法解压路径: {info.filename}")
         z.extractall(cache)
     open(os.path.join(cache, ".extracted"), "w").write("")
     return cache
@@ -103,6 +109,14 @@ def _info(msg):
     """信息输出，--quiet 时抑制（错误仍走 stderr/sys.exit）。"""
     if not QUIET:
         print(msg)
+
+
+def _warn(msg):
+    """警告输出（stderr，不受 --quiet 抑制）。"""
+    print(f"[警告] {msg}", file=sys.stderr)
+
+
+_ARGS = None  # 当前 argparse 命名空间（供 download_file 读取 --no-verify）
 
 
 def _progress_ok():
@@ -201,6 +215,8 @@ def load_config(path):
 def load_registry(name, registry_base=None):
     """读取组件注册表 JSON。registry_base 为远程 raw URL 时优先远程。"""
     if registry_base:
+        _warn(f"使用远程注册表 --registry-base={registry_base}：该源完全可信，"
+              "请确保其由你信任的仓库维护（SHA256 校验依赖同源 .sha256，注册表被篡改则失效）")
         url = gh_proxy_url(registry_base.rstrip("/") + "/" + name)
         try:
             with urllib.request.urlopen(url, timeout=15) as r:
@@ -273,11 +289,48 @@ def gh_proxy_url(url):
     return url
 
 
-def download_file(url, dest, desc=""):
-    """下载文件到 dest，带进度显示 + 断点续传。
+def _sha256_hex(path, chunk=1024 * 1024):
+    """计算文件 SHA256（hex）。"""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def _parse_sha256_file(text):
+    """解析 .sha256 文件，返回首个 64 位 hex 校验值；失败返回 None。"""
+    m = re.search(r"[0-9a-fA-F]{64}", text or "")
+    return m.group(0).lower() if m else None
+
+
+def _verify_sha256(path, expected_hex, what=""):
+    """校验文件 SHA256；不匹配则删除并报错。"""
+    if not expected_hex:
+        return True
+    actual = _sha256_hex(path)
+    if actual.lower() == expected_hex.lower():
+        return True
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    sys.exit(f"安全校验失败: {what or os.path.basename(path)} SHA256 不匹配\n"
+             f"  预期 {expected_hex}\n  实际 {actual}\n"
+             f"  已删除 {path}。请勿使用 --no-verify，除非信任该下载源。")
+
+
+def download_file(url, dest, desc="", expected_sha256=None, sha256_url=None):
+    """下载文件到 dest，带进度显示 + 断点续传 + SHA256 校验。
 
     未完成部分保存在 dest.part；中断后再次运行会从断点继续（HTTP Range）。
     失败时保留 .part，不清理。
+    若给 sha256_url（通常为 url + '.sha256'），下载完成后拉取该边车并校验。
+    expected_sha256 为已知 hex 时直接校验。
     """
     url = gh_proxy_url(url)
     _info(f"下载 {desc or os.path.basename(dest)} ...")
@@ -334,6 +387,41 @@ def download_file(url, dest, desc=""):
         # 保留 .part 供断点续传
         sys.exit(f"下载失败 {url}: {e} (已保留 {tmp}，下次运行可断点续传)")
 
+    # ---- SHA256 校验（供应链完整性） ----
+    if getattr(args_ref(), "no_verify", False):
+        return
+    expected = expected_sha256
+    if not expected and sha256_url:
+        expected = _fetch_sha256(sha256_url)
+        if expected is None:
+            _warn(f"未找到校验文件 {sha256_url}，跳过 SHA256 校验（建议更新 Release 以包含 .sha256）")
+            return
+    if expected:
+        _verify_sha256(dest, expected, desc or os.path.basename(dest))
+
+
+def _fetch_sha256(url):
+    """拉取 .sha256 边车，返回 hex；失败返回 None。"""
+    try:
+        with urllib.request.urlopen(gh_proxy_url(url), timeout=20) as r:
+            return _parse_sha256_file(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def args_ref():
+    """返回当前 argparse 命名空间（惰性，供 download_file 读取 --no-verify）。"""
+    global _ARGS
+    return _ARGS
+
+
+def _download_verified(url, dest, desc=""):
+    """下载 Release 产物并从同源 .sha256 边车校验（供应链完整性）。
+
+    若 .sha256 缺失（旧版 Release），下载仍继续但发出警告（--no-verify 可强制跳过）。
+    """
+    download_file(url, dest, desc, sha256_url=url + ".sha256")
+
 
 def _safe_join(dest, name):
     """防 zip-slip / path traversal：确保解压目标在 dest 内。"""
@@ -386,6 +474,11 @@ DD_URLS = {
     "linux": "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-linux-x64.zip",
     "win64": "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-windows-x64.zip",
 }
+# DepotDownloader 3.4.0 官方 Release 产物的 SHA256（钉死，供应链完整性；SteamRE 升级需同步更新）
+DD_SHA256 = {
+    "linux": "a999dec66b4850fc961bd50366696d23c2d0fad7b18790e6a5647b2f19097a53",
+    "win64": "41c9e9f0df54b3ad02e67a11726756e5c73283bd7c2e1b04acfa5ae4c2ed3767",
+}
 DD_NAME = {"linux": "DepotDownloader", "win64": "DepotDownloader.exe"}
 
 
@@ -403,7 +496,8 @@ def ensure_depot_tool(workdir, platform, allow_download=True):
     _info(f"未提供 depot_tool，自动下载 DepotDownloader ({platform}) ...")
     os.makedirs(tool_dir, exist_ok=True)
     zip_path = os.path.join(tool_dir, "dd.zip")
-    download_file(DD_URLS[platform], zip_path, "DepotDownloader")
+    download_file(DD_URLS[platform], zip_path, "DepotDownloader",
+                  expected_sha256=DD_SHA256.get(platform))
     extract_archive(zip_path, tool_dir)
     if os.path.exists(zip_path):
         os.remove(zip_path)
@@ -476,8 +570,34 @@ CORE_PREBUILT = {
 }
 
 
-def _update_start_scripts(platform, tree):
-    """用主仓库最新的启动脚本覆盖精简树内的启动脚本（含网络优化参数）。"""
+def _harden_perm(tree):
+    """收紧精简树权限：树根 700，敏感文件（内嵌凭据/令牌）600。
+
+    start_server.sh 内嵌面板账号密码、web_token.txt 存认证令牌，默认目录 755 会让同机
+    其他用户可读。收紧后仅属主可访问。
+    """
+    try:
+        os.chmod(tree, 0o700)
+    except OSError:
+        pass
+    for root, _, files in os.walk(tree):
+        for fn in files:
+            low = fn.lower()
+            if (fn in ("start_server.sh", "start_server.bat", "web_token.txt")
+                    or low.endswith(".token") or "token" in low):
+                p = os.path.join(root, fn)
+                try:
+                    os.chmod(p, 0o600)
+                except OSError:
+                    pass
+
+
+def _update_start_scripts(platform, tree, registry_base=None):
+    """用主仓库最新的启动脚本覆盖精简树内的启动脚本（含网络优化参数）。
+
+    从 raw.githubusercontent main 拉取，但按 core.json 中钉死的 SHA256 校验，
+    防止脚本被篡改后直接执行（RCE 向量）。
+    """
     try:
         if platform == "linux":
             url = "https://raw.githubusercontent.com/cyqmq/cs2-slim-replica/main/core/deploy/linux/start_server.sh"
@@ -485,11 +605,16 @@ def _update_start_scripts(platform, tree):
         else:
             url = "https://raw.githubusercontent.com/cyqmq/cs2-slim-replica/main/core/deploy/windows/start_server.bat"
             dst = os.path.join(tree, "start_server.bat")
-        url = gh_proxy_url(url)
+        reg_core = load_registry("core.json", registry_base)
+        expected = ((reg_core or {}).get("start_scripts", {}).get(platform) or {}).get("sha256")
         tmp = dst + ".new"
-        urllib.request.urlretrieve(url, tmp)
+        download_file(url, tmp, "启动脚本", expected_sha256=expected)
         os.replace(tmp, dst)
+        if os.path.exists(dst):
+            os.chmod(dst, 0o700)
         print("  已更新启动脚本（含 VPN/TUN 网络优化参数）")
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"  WARN: 更新启动脚本失败: {e}")
 
@@ -990,11 +1115,8 @@ def cmd_selfupdate(args, cfg):
         if not zip_path:
             sys.exit("无法定位当前 cs2slim.pyz")
         tmp = zip_path + ".new"
-        download_file(
-            "https://github.com/cyqmq/cs2slim-cli/releases/latest/download/cs2slim.pyz",
-            tmp,
-            "下载新版 cs2slim.pyz",
-        )
+        pyz_url = "https://github.com/cyqmq/cs2slim-cli/releases/latest/download/cs2slim.pyz"
+        download_file(pyz_url, tmp, "下载新版 cs2slim.pyz", sha256_url=pyz_url + ".sha256")
         os.chmod(tmp, 0o755)
         os.replace(tmp, zip_path)
         print(f"已替换: {zip_path}")
@@ -1100,7 +1222,7 @@ def cmd_upgrade(args, cfg):
             mzip = os.path.join(workdir, f"{m}.zip")
             if os.path.exists(mzip):
                 os.remove(mzip)
-            download_file(url, mzip, f"地图 {m} (升级)")
+            download_file(url, mzip, f"地图 {m} (升级)", sha256_url=url + ".sha256")
             extract_archive(mzip, tree)
             print(f"  已升级地图 {m}")
         reg_f = load_registry("features.json", cfg.get("registry_base"))
@@ -1112,7 +1234,7 @@ def cmd_upgrade(args, cfg):
             fzip = os.path.join(workdir, f"{f}-pack.zip")
             if os.path.exists(fzip):
                 os.remove(fzip)
-            download_file(url, fzip, f"功能 {f} (升级)")
+            download_file(url, fzip, f"功能 {f} (升级)", sha256_url=url + ".sha256")
             extract_archive(fzip, tree)
             print(f"  已升级功能 {f}")
         # 功能后置补丁
@@ -1182,7 +1304,7 @@ def cmd_prebuilt(args, cfg):
     # 1. 核心包
     core_path = os.path.join(workdir, core["name"])
     if not os.path.exists(core_path):
-        download_file(core["url"], core_path, f"核心精简包 {core['name']}")
+        download_file(core["url"], core_path, f"核心精简包 {core['name']}", sha256_url=core["url"] + ".sha256")
 
     # 2. 解压核心包
     if os.path.exists(tree):
@@ -1194,7 +1316,7 @@ def cmd_prebuilt(args, cfg):
     # 确保 steamclient.so 有效（缺失/损坏时自动从 Steam SDK 包补下）
     if platform == "linux":
         ensure_steamclient(tree, workdir)
-    _update_start_scripts(platform, tree)
+    _update_start_scripts(platform, tree, cfg.get("registry_base"))
     # 修复执行权限（面板场景默认只给 start.sh 权限）
     if platform == "linux":
         cs2_bin = os.path.join(tree, "game", "bin", "linuxsteamrt64", "cs2")
@@ -1222,7 +1344,7 @@ def cmd_prebuilt(args, cfg):
             )
         mzip = os.path.join(workdir, f"{m}.zip")
         if not os.path.exists(mzip):
-            download_file(url, mzip, f"地图 {m}")
+            download_file(url, mzip, f"地图 {m}", sha256_url=url + ".sha256")
         print(f"  拼装地图 {m} ...")
         extract_archive(mzip, tree)
 
@@ -1239,7 +1361,7 @@ def cmd_prebuilt(args, cfg):
             sys.exit(f"错误: 功能 {f} 暂无预构建包，prebuilt 模式无法安装（请改用 source 模式）")
         fzip = os.path.join(workdir, f"{f}-pack.zip")
         if not os.path.exists(fzip):
-            download_file(url, fzip, f"功能 {f}")
+            download_file(url, fzip, f"功能 {f}", sha256_url=url + ".sha256")
         print(f"  拼装功能 {f} ...")
         extract_archive(fzip, tree)
     # link-manager 启动器兜底：确保 cs2lm 可执行（旧 zip/部分解压工具会丢失执行位）
@@ -1254,6 +1376,9 @@ def cmd_prebuilt(args, cfg):
         _patch_gameinfo_for_addon(tree, "csgo/addons/swiftlys2", "SwiftlyS2")
     if any(f in ("modsharp", "modsharp-win") for f in features):
         _patch_gameinfo_for_addon(tree, "sharp", "ModSharp")
+
+    # 收紧权限（明文凭据/令牌文件）
+    _harden_perm(tree)
 
     # 5. 报告
     print()
@@ -1438,6 +1563,8 @@ def main():
         p.add_argument("--quiet", action="store_true", help="静默输出（仅错误/结果）")
         p.add_argument("--no-progress", action="store_true", help="禁用实时进度条（非 TTY 自动降级为逐行）")
         p.add_argument("--registry-base", help="远程组件目录 raw URL 前缀（优先于本地 registry/）")
+        p.add_argument("--no-verify", action="store_true",
+                       help="禁用 SHA256 供应链校验（不安全，仅在信任下载源时使用）")
 
     p_init = sub.add_parser("init", help="生成配置模板")
     p_init.add_argument("--output", default=".", help="输出目录或文件路径")
@@ -1499,6 +1626,8 @@ def main():
     p_su.set_defaults(func=cmd_selfupdate)
 
     args = ap.parse_args()
+    global _ARGS
+    _ARGS = args
 
     # 全局输出控制：--quiet 抑制进度/信息；--no-progress 关闭 \r 实时进度
     if getattr(args, "quiet", False):

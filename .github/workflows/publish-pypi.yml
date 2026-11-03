@@ -39,6 +39,10 @@ jobs:
         run: python -m build
       - name: Build zipapp
         run: bash scripts/make_zipapp.sh release-assets
+      - name: Generate SHA256 checksums
+        run: |
+          ( cd release-assets && sha256sum cs2slim.pyz > cs2slim.pyz.sha256 )
+          ( cd dist && for f in *.whl *.tar.gz; do sha256sum "$f" > "$f.sha256"; done )
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,7 +51,8 @@ jobs:
             echo "Release ${{ github.ref_name }} 已存在，跳过"
           else
             gh release create "${{ github.ref_name }}" \
-              dist/*.whl dist/*.tar.gz release-assets/cs2slim.pyz \
+              dist/*.whl dist/*.tar.gz dist/*.whl.sha256 dist/*.tar.gz.sha256 \
+              release-assets/cs2slim.pyz release-assets/cs2slim.pyz.sha256 \
               scripts/get-cs2slim.sh scripts/get-cs2slim.ps1 \
               --generate-notes
           fi
