@@ -29,7 +29,7 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
 
-__version__ = "1.0.10"
+__version__ = "1.0.11"
 
 import argparse
 import json
@@ -280,9 +280,13 @@ def build_combined_filelist(core_filelist, cfg, registry_base=None):
 # ---------------------------------------------------------------------------
 # 下载/解压工具
 # ---------------------------------------------------------------------------
+# GitHub 下载镜像前缀（优先级：--gh-proxy > slim.yaml gh_proxy > 环境变量 CS2_GH_PROXY）
+_GH_PROXY = os.environ.get("CS2_GH_PROXY", "").strip().rstrip("/")
+
+
 def gh_proxy_url(url):
-    """若设置了 CS2_GH_PROXY（如 https://ghproxy.com），为 GitHub URL 加代理前缀。"""
-    proxy = os.environ.get("CS2_GH_PROXY", "").strip().rstrip("/")
+    """为 GitHub URL 加镜像前缀（若已配置），用于国内网络加速，内容不变不影响 SHA256 校验。"""
+    proxy = _GH_PROXY
     if proxy and (url.startswith("https://github.com/")
                   or url.startswith("https://raw.githubusercontent.com/")):
         return f"{proxy}/{url}"
@@ -1724,6 +1728,7 @@ def main():
     # 通用选项（同时挂在顶层和每个子命令，便于 `cs2slim.py download --config slim.yaml`）
     def add_common(p):
         p.add_argument("--config", help="配置文件 (slim.yaml / slim.json)")
+        p.add_argument("--gh-proxy", help="GitHub 下载镜像前缀（如 https://ghfast.top；覆盖 slim.yaml 的 gh_proxy 与环境变量 CS2_GH_PROXY）")
         p.add_argument("--platform", choices=["linux", "win64"], help="目标平台")
         p.add_argument("--maps", help="地图列表, 逗号分隔, 如 de_dust2,de_mirage")
         p.add_argument("--features", help="功能列表, 逗号分隔, 如 bots")
@@ -1823,6 +1828,12 @@ def main():
         cfg["depot_tool"] = args.depot_tool
     if getattr(args, "registry_base", None):
         cfg["registry_base"] = args.registry_base
+    # GitHub 镜像：--gh-proxy 覆盖 slim.yaml gh_proxy，再兜底环境变量 CS2_GH_PROXY（_GH_PROXY 初值）
+    if getattr(args, "gh_proxy", None):
+        cfg["gh_proxy"] = args.gh_proxy
+    if cfg.get("gh_proxy"):
+        global _GH_PROXY
+        _GH_PROXY = str(cfg["gh_proxy"]).strip().rstrip("/")
 
     args.func(args, cfg)
 
