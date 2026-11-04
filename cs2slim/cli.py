@@ -29,7 +29,7 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
 
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 
 import argparse
 import json
@@ -451,6 +451,11 @@ def extract_archive(path, dest):
                         os.chmod(target, mode)
                     except OSError:
                         pass
+    elif path.endswith(".tar.bz2"):
+        with tarfile.open(path, "r:bz2") as t:
+            for m in t.getmembers():
+                _safe_join(dest, m.name)
+            t.extractall(dest)
     else:
         with tarfile.open(path, "r:gz") as t:
             for m in t.getmembers():
@@ -1166,13 +1171,19 @@ def _write_version(tree, reg_core, reg_maps, reg_feat, maps, features, feature_v
         print(f"  WARN: 版本文件写入失败: {e}")
 
 
-def _upstream_latest(repo):
+def _upstream_latest(repo, incl_prerelease=False):
     """解析上游 GitHub 仓库最新 Release 的资产与 sha256 digest（GitHub 官方提供）。
 
-    返回 (info, err)；info 含 version 与 assets[{name,url,digest}]。
+    incl_prerelease=True 时取最新（含 prerelease），用于上游最新版是预发布的组件
+    （如 Metamod:Source 的 CS2 版 2.0.x 走 prerelease，/releases/latest 只会拿到 Source1 1.12 版）。
+
+    返回 (info, err)；info 含 version（去 v 前缀）、tag（原始）与 assets[{name,url,digest}]。
     资产 digest 与下载同源（GitHub HTTPS），用于完整性校验，避免 TOFU。
     """
-    api = f"https://api.github.com/repos/{repo}/releases/latest"
+    if incl_prerelease:
+        api = f"https://api.github.com/repos/{repo}/releases?per_page=30"
+    else:
+        api = f"https://api.github.com/repos/{repo}/releases/latest"
     req = urllib.request.Request(api, headers={
         "Accept": "application/vnd.github+json",
         "User-Agent": "cs2slim-cli",
@@ -1180,6 +1191,9 @@ def _upstream_latest(repo):
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             d = json.loads(r.read().decode("utf-8"))
+        if isinstance(d, list):
+            # 取最新 prerelease（Metamod CS2 版 2.0.x 走 prerelease；stable 最新是 Source1 1.12）
+            d = next((x for x in d if x.get("prerelease")), d[0] if d else {})
     except Exception as e:
         return None, f"上游解析失败 {api}: {e}"
     assets = []
@@ -1190,22 +1204,44 @@ def _upstream_latest(repo):
             "url": a.get("browser_download_url", ""),
             "digest": digest if len(digest) == 64 else "",
         })
-    return {"version": (d.get("tag_name") or "").lstrip("vV"), "assets": assets}, None
+    return {"version": (d.get("tag_name") or "").lstrip("vV"),
+            "tag": d.get("tag_name") or "", "assets": assets}, None
 
 
 def _upstream_feature_asset(meta, latest):
-    """从上游资产中选出匹配 variant 的 with-runtime 包。"""
+    """从上游资产中选出匹配 variant 的功能包。
+
+    优先精确 asset_pattern；否则按 variant（词边界）+ 常见扩展名模糊匹配，
+    排除 pdb/extensions/symbols 调试包，优先 with-runtime 包。
+    """
     up = meta.get("upstream", {})
     variant = up.get("variant", "linux")
     pat = up.get("asset_pattern", "counterstrikesharp-with-runtime-{variant}-{version}.zip")
     want = pat.format(variant=variant, version=latest.get("version", ""))
-    for a in latest.get("assets", []):
+    assets = latest.get("assets", [])
+    for a in assets:
         if a["name"] == want:
             return a
-    for a in latest.get("assets", []):
+    rxv = re.compile(r"(?<![a-z0-9])" + re.escape(variant) + r"(?![a-z0-9])")
+
+    def _ok(n):
+        return bool(rxv.search(n.lower()))
+    # 1) with-runtime 优先（CSS/Swiftly 的 .NET 运行时内置包）
+    for a in assets:
         n = a["name"]
-        if n.endswith(".zip") and "with-runtime" in n and variant in n:
+        if n.endswith(".zip") and "with-runtime" in n and _ok(n):
             return a
+    # 2) 通用匹配：variant + 常见压缩扩展名，跳过调试/扩展包
+    for a in assets:
+        n = a["name"]
+        if not _ok(n):
+            continue
+        if not n.endswith((".zip", ".tar.gz", ".tar.bz2")):
+            continue
+        low = n.lower()
+        if any(x in low for x in ("pdb", "extensions", "symbols", "-debug")):
+            continue
+        return a
     return None
 
 
@@ -1221,7 +1257,8 @@ def _install_feature(meta, tree, workdir, name, platform):
         repo = up.get("repo") or ""
         if not repo:
             sys.exit(f"错误: 功能 {name} 上游配置缺少 repo")
-        latest, err = _upstream_latest(repo)
+        os.makedirs(workdir, exist_ok=True)
+        latest, err = _upstream_latest(repo, incl_prerelease=bool(up.get("prerelease")))
         if err or not latest:
             # 回退：registry 钉住的版本 + sha256
             pinned_v = meta.get("version") or ""
@@ -1229,22 +1266,32 @@ def _install_feature(meta, tree, workdir, name, platform):
             if not pinned_v:
                 sys.exit(f"错误: 功能 {name} 无法解析上游 {repo}: {err}")
             _warn(f"上游 {repo} API 不可用（{err}），使用 registry 钉住的 v{pinned_v}（可能非最新）")
-            latest = {"version": pinned_v, "assets": []}
+            latest = {"version": pinned_v, "tag": up.get("tag") or pinned_v, "assets": []}
             pinned_sha = pinned_sha
         asset = _upstream_feature_asset(meta, latest)
         if not asset and latest.get("assets"):
             sys.exit(f"错误: 功能 {name} 上游 {repo}@{latest['version']} 未找到匹配资产")
         if not asset:
-            # 钉住回退：按 pattern 构造 URL
+            # 钉住回退：按 asset_name/pattern 构造 URL（tag 原样，兼容带/不带 v 前缀）
             pat = up.get("asset_pattern", "counterstrikesharp-with-runtime-{variant}-{version}.zip")
-            asset_name = pat.format(variant=up.get("variant", "linux"), version=latest["version"])
-            asset = {"name": asset_name, "url": f"https://github.com/{repo}/releases/download/v{latest['version']}/{asset_name}",
+            tag = latest.get("tag") or latest.get("version", "")
+            asset_name = up.get("asset_name") or pat.format(
+                variant=up.get("variant", "linux"), version=latest["version"])
+            asset = {"name": asset_name, "url": f"https://github.com/{repo}/releases/download/{tag}/{asset_name}",
                      "digest": pinned_sha}
         dest = os.path.join(workdir, f"{name}-upstream-{asset['name']}")
         extract_dir = os.path.join(tree, up.get("extract_dir", "game/csgo"))
         print(f"  安装功能 {name}（上游 {repo}@{latest['version']}）...")
         download_file(asset["url"], dest, f"功能 {name}", expected_sha256=asset.get("digest") or None)
         extract_archive(dest, extract_dir)
+        # 上游包自带单根目录（如 swiftly 的 swiftlys2-<ver>-with-runtimes/）时上移其内容
+        if up.get("strip_root"):
+            entries = [e for e in os.listdir(extract_dir) if not e.startswith("__MACOSX")]
+            if len(entries) == 1 and os.path.isdir(os.path.join(extract_dir, entries[0])):
+                root = os.path.join(extract_dir, entries[0])
+                for e in os.listdir(root):
+                    shutil.move(os.path.join(root, e), os.path.join(extract_dir, e))
+                os.rmdir(root)
         return latest["version"], True
     # 预构建包（features 发布）
     url = meta.get("prebuilt_url") or ""
@@ -1264,7 +1311,7 @@ def _feature_latest_version(meta, platform):
         up = meta.get("upstream", {})
         repo = up.get("repo") or ""
         if repo:
-            latest, err = _upstream_latest(repo)
+            latest, err = _upstream_latest(repo, incl_prerelease=bool(up.get("prerelease")))
             if latest and not err:
                 return latest.get("version", "")
     return meta.get("release_version") or ""
