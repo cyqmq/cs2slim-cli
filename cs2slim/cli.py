@@ -29,7 +29,7 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
 
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 import argparse
 import json
@@ -1142,14 +1142,19 @@ def _read_version(tree):
         return {}
 
 
-def _write_version(tree, reg_core, reg_maps, reg_feat, maps, features):
-    """安装/升级后写入版本文件，供 status/upgrade 对比。"""
+def _write_version(tree, reg_core, reg_maps, reg_feat, maps, features, feature_versions=None):
+    """安装/升级后写入版本文件，供 status/upgrade 对比。
+
+    feature_versions: 功能 -> 已安装版本 的覆盖（上游直装用解析到的上游版本）。
+    """
     import datetime
+    feature_versions = feature_versions or {}
     data = {
         "core": (reg_core or {}).get("version", ""),
         "maps": {m: (reg_maps.get("maps", {}).get(m, {}).get("release_version", "")
                      or (reg_maps or {}).get("release_version", "")) for m in maps if m != "de_dust2"},
-        "features": {f: (reg_feat.get("features", {}).get(f, {}).get("release_version", "")
+        "features": {f: (feature_versions.get(f)
+                         or reg_feat.get("features", {}).get(f, {}).get("release_version", "")
                          or (reg_feat or {}).get("release_version", "")) for f in features},
         "checked": datetime.datetime.now().isoformat(timespec="seconds"),
     }
@@ -1159,6 +1164,110 @@ def _write_version(tree, reg_core, reg_maps, reg_feat, maps, features):
             f.write("\n")
     except OSError as e:
         print(f"  WARN: 版本文件写入失败: {e}")
+
+
+def _upstream_latest(repo):
+    """解析上游 GitHub 仓库最新 Release 的资产与 sha256 digest（GitHub 官方提供）。
+
+    返回 (info, err)；info 含 version 与 assets[{name,url,digest}]。
+    资产 digest 与下载同源（GitHub HTTPS），用于完整性校验，避免 TOFU。
+    """
+    api = f"https://api.github.com/repos/{repo}/releases/latest"
+    req = urllib.request.Request(api, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "cs2slim-cli",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        return None, f"上游解析失败 {api}: {e}"
+    assets = []
+    for a in d.get("assets", []):
+        digest = (a.get("digest") or "").split(":", 1)[-1]
+        assets.append({
+            "name": a.get("name", ""),
+            "url": a.get("browser_download_url", ""),
+            "digest": digest if len(digest) == 64 else "",
+        })
+    return {"version": (d.get("tag_name") or "").lstrip("vV"), "assets": assets}, None
+
+
+def _upstream_feature_asset(meta, latest):
+    """从上游资产中选出匹配 variant 的 with-runtime 包。"""
+    up = meta.get("upstream", {})
+    variant = up.get("variant", "linux")
+    pat = up.get("asset_pattern", "counterstrikesharp-with-runtime-{variant}-{version}.zip")
+    want = pat.format(variant=variant, version=latest.get("version", ""))
+    for a in latest.get("assets", []):
+        if a["name"] == want:
+            return a
+    for a in latest.get("assets", []):
+        n = a["name"]
+        if n.endswith(".zip") and "with-runtime" in n and variant in n:
+            return a
+    return None
+
+
+def _install_feature(meta, tree, workdir, name, platform):
+    """安装单个功能组件：上游直装（source=upstream）或预构建包。
+
+    返回 (resolved_version, installed)。
+    上游直装：优先解析 GitHub releases/latest 并按资产 sha256 digest 校验；
+    若 API 不可用（限流/离线），回退到 registry 钉住的 version+sha256（校验仍生效）。
+    """
+    if meta.get("source") == "upstream":
+        up = meta.get("upstream", {})
+        repo = up.get("repo") or ""
+        if not repo:
+            sys.exit(f"错误: 功能 {name} 上游配置缺少 repo")
+        latest, err = _upstream_latest(repo)
+        if err or not latest:
+            # 回退：registry 钉住的版本 + sha256
+            pinned_v = meta.get("version") or ""
+            pinned_sha = meta.get("sha256") or ""
+            if not pinned_v:
+                sys.exit(f"错误: 功能 {name} 无法解析上游 {repo}: {err}")
+            _warn(f"上游 {repo} API 不可用（{err}），使用 registry 钉住的 v{pinned_v}（可能非最新）")
+            latest = {"version": pinned_v, "assets": []}
+            pinned_sha = pinned_sha
+        asset = _upstream_feature_asset(meta, latest)
+        if not asset and latest.get("assets"):
+            sys.exit(f"错误: 功能 {name} 上游 {repo}@{latest['version']} 未找到匹配资产")
+        if not asset:
+            # 钉住回退：按 pattern 构造 URL
+            pat = up.get("asset_pattern", "counterstrikesharp-with-runtime-{variant}-{version}.zip")
+            asset_name = pat.format(variant=up.get("variant", "linux"), version=latest["version"])
+            asset = {"name": asset_name, "url": f"https://github.com/{repo}/releases/download/v{latest['version']}/{asset_name}",
+                     "digest": pinned_sha}
+        dest = os.path.join(workdir, f"{name}-upstream-{asset['name']}")
+        extract_dir = os.path.join(tree, up.get("extract_dir", "game/csgo"))
+        print(f"  安装功能 {name}（上游 {repo}@{latest['version']}）...")
+        download_file(asset["url"], dest, f"功能 {name}", expected_sha256=asset.get("digest") or None)
+        extract_archive(dest, extract_dir)
+        return latest["version"], True
+    # 预构建包（features 发布）
+    url = meta.get("prebuilt_url") or ""
+    if not url:
+        sys.exit(f"错误: 功能 {name} 暂无预构建包，prebuilt 模式无法安装（请改用 source 模式）")
+    fzip = os.path.join(workdir, f"{name}-pack.zip")
+    if not os.path.exists(fzip):
+        download_file(url, fzip, f"功能 {name}", sha256_url=url + ".sha256")
+    print(f"  拼装功能 {name} ...")
+    extract_archive(fzip, tree)
+    return meta.get("release_version") or "", True
+
+
+def _feature_latest_version(meta, platform):
+    """功能组件的最新版本：上游直装解析上游最新，否则取 registry release_version。"""
+    if meta.get("source") == "upstream":
+        up = meta.get("upstream", {})
+        repo = up.get("repo") or ""
+        if repo:
+            latest, err = _upstream_latest(repo)
+            if latest and not err:
+                return latest.get("version", "")
+    return meta.get("release_version") or ""
 
 
 def cmd_upgrade(args, cfg):
@@ -1185,8 +1294,10 @@ def cmd_upgrade(args, cfg):
         if _upd(f"地图 {m}", v, maps_latest):
             updates.append((f"地图 {m}", v, maps_latest))
     for f, v in (installed.get("features") or {}).items():
-        if _upd(f"功能 {f}", v, feat_latest):
-            updates.append((f"功能 {f}", v, feat_latest))
+        meta = reg_feat.get("features", {}).get(f) or {}
+        latest = _feature_latest_version(meta, platform)
+        if latest and _upd(f"功能 {f}", v, latest):
+            updates.append((f"功能 {f}", v, latest))
     if not updates:
         print("已是最新版本（无需升级）")
         _cli_upgrade_hint()
@@ -1226,8 +1337,15 @@ def cmd_upgrade(args, cfg):
             extract_archive(mzip, tree)
             print(f"  已升级地图 {m}")
         reg_f = load_registry("features.json", cfg.get("registry_base"))
+        upgraded_versions = {}
         for f in feat_needs:
             meta = reg_f.get("features", {}).get(f) or {}
+            if meta.get("source") == "upstream":
+                v, _ = _install_feature(meta, tree, workdir, f, platform)
+                if v:
+                    upgraded_versions[f] = v
+                print(f"  已升级功能 {f}")
+                continue
             url = meta.get("prebuilt_url")
             if not url:
                 print(f"  WARN: 功能 {f} 无预构建包，跳过"); continue
@@ -1237,6 +1355,9 @@ def cmd_upgrade(args, cfg):
             download_file(url, fzip, f"功能 {f} (升级)", sha256_url=url + ".sha256")
             extract_archive(fzip, tree)
             print(f"  已升级功能 {f}")
+            v = meta.get("release_version") or ""
+            if v:
+                upgraded_versions[f] = v
         # 功能后置补丁
         if any(f in ("metamod", "metamod-win") for f in feat_needs):
             _patch_gameinfo_for_addon(tree, "csgo/addons/metamod", "Metamod")
@@ -1246,7 +1367,8 @@ def cmd_upgrade(args, cfg):
             _patch_gameinfo_for_addon(tree, "sharp", "ModSharp")
         # 更新版本文件（仅地图/功能分支）
         _write_version(tree, reg_core, reg_maps, reg_feat,
-                        resolve_maps(cfg), parse_csv(cfg.get("features") or []))
+                        resolve_maps(cfg), parse_csv(cfg.get("features") or []),
+                        upgraded_versions)
     print("升级完成")
     _cli_upgrade_hint()
 
@@ -1294,6 +1416,10 @@ def cmd_prebuilt(args, cfg):
             meta = reg_feat.get("features", {}).get(f)
             if meta is None:
                 sys.exit(f"错误: 未知功能组件 {f}，请检查 registry/features.json")
+            if meta.get("source") == "upstream":
+                up = meta.get("upstream", {})
+                print(f"  功能 {f}: 上游 {up.get('repo')}（releases/latest，解压到 {up.get('extract_dir','game/csgo')}/）")
+                continue
             url = meta.get("prebuilt_url") or ""
             if not url:
                 print(f"  [不可用] 功能 {f}: 无预构建包（prebuilt 模式不可用）")
@@ -1352,18 +1478,14 @@ def cmd_prebuilt(args, cfg):
     features = parse_csv(cfg.get("features") or [])
     reg_feat = load_registry("features.json", cfg.get("registry_base"))
     features = _expand_feature_deps(features, reg_feat)
+    feature_versions = {}
     for f in features:
         meta = reg_feat.get("features", {}).get(f)
         if meta is None:
             sys.exit(f"错误: 未知功能组件 {f}，请检查 registry/features.json")
-        url = meta.get("prebuilt_url") or ""
-        if not url:
-            sys.exit(f"错误: 功能 {f} 暂无预构建包，prebuilt 模式无法安装（请改用 source 模式）")
-        fzip = os.path.join(workdir, f"{f}-pack.zip")
-        if not os.path.exists(fzip):
-            download_file(url, fzip, f"功能 {f}", sha256_url=url + ".sha256")
-        print(f"  拼装功能 {f} ...")
-        extract_archive(fzip, tree)
+        v, _ = _install_feature(meta, tree, workdir, f, platform)
+        if v:
+            feature_versions[f] = v
     # link-manager 启动器兜底：确保 cs2lm 可执行（旧 zip/部分解压工具会丢失执行位）
     if platform == "linux" and any(f in ("link-manager",) for f in features):
         lm_launcher = os.path.join(tree, "cs2lm")
@@ -1396,7 +1518,7 @@ def cmd_prebuilt(args, cfg):
         reg_core = None
     reg_maps = load_registry("maps.json", cfg.get("registry_base"))
     reg_feat = load_registry("features.json", cfg.get("registry_base"))
-    _write_version(tree, reg_core, reg_maps, reg_feat, maps, features)
+    _write_version(tree, reg_core, reg_maps, reg_feat, maps, features, feature_versions)
 
 
 # ---------------------------------------------------------------------------
