@@ -29,7 +29,7 @@ cs2slim - CS2 精简服务端 配置驱动 CLI（用户侧工具）
 依赖: 仅 Python 3 标准库 (无需 PyYAML)。
 """
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 import argparse
 import json
@@ -734,7 +734,7 @@ def cmd_init(args, cfg):
 
 
 def cmd_download(args, cfg):
-    platform = cfg.get("platform") or args.platform or "win64"
+    platform = cfg.get("platform") or args.platform or detect_platform()
     if platform not in PLATFORM_DEPOT:
         sys.exit(f"不支持的平台: {platform} (可选 linux/win64)")
     binary_depot, binary_filelist_name = PLATFORM_DEPOT[platform]
@@ -803,7 +803,7 @@ def cmd_extract(args, cfg):
 
 def cmd_build(args, cfg):
     workdir = os.path.abspath(cfg.get("workdir") or "./cs2-build")
-    platform = cfg.get("platform") or "win64"
+    platform = cfg.get("platform") or args.platform or detect_platform()
     maps = resolve_maps(cfg)
     extra = [m for m in maps if m != "de_dust2"]
 
@@ -837,7 +837,7 @@ def cmd_build(args, cfg):
 
 
 def cmd_package(args, cfg):
-    platform = cfg.get("platform") or "win64"
+    platform = cfg.get("platform") or args.platform or detect_platform()
     workdir = os.path.abspath(cfg.get("workdir") or "./cs2-build")
     tree = os.path.join(workdir, "slim-win" if platform == "win64" else "slim")
     if not os.path.exists(tree):
@@ -893,7 +893,7 @@ def _port_udp_in_use(port):
 
 
 def cmd_run(args, cfg):
-    platform = cfg.get("platform") or "win64"
+    platform = cfg.get("platform") or args.platform or detect_platform()
     workdir = os.path.abspath(cfg.get("workdir") or "./cs2-build")
     # build 实际输出在 <workdir>/slim 或 <workdir>/slim-win 下
     tree = os.path.join(workdir, "slim-win" if platform == "win64" else "slim")
@@ -1002,7 +1002,7 @@ def cmd_all(args, cfg):
         cmd_package(args, cfg)
     else:
         print("=" * 60)
-        platform = cfg.get("platform") or "win64"
+        platform = cfg.get("platform") or args.platform or detect_platform()
         print("一键完成! 精简树已就绪:")
         if platform == "linux":
             print("  启动: bash <workdir>/slim/start_server.sh")
@@ -1263,7 +1263,7 @@ def _cli_upgrade_hint():
 
 
 def cmd_prebuilt(args, cfg):
-    platform = cfg.get("platform") or "win64"
+    platform = cfg.get("platform") or args.platform or detect_platform()
     if platform not in CORE_PREBUILT:
         sys.exit(f"不支持的平台: {platform} (可选 linux/win64)")
     workdir = os.path.abspath(cfg.get("workdir") or "./cs2-build")
