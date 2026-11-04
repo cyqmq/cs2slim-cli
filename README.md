@@ -42,6 +42,26 @@ cs2slim clean           # 清理下载缓存
 - `status` 对比已装版本与附属仓库（cs2-slim-replica / cs2-slim-maps / cs2-slim-features）最新 Release。
 - `upgrade` 检测到新版本后自动重新拉取对应预构建包并解压，核心升级时自动重跑 prebuilt。
 
+## 供应链校验与下载加速
+
+- **SHA256 校验**：所有下载产物（核心包 / 地图 / 功能 / DepotDownloader / CLI 自更新）均校验 SHA256（Release 挂 `.sha256` 边车或 GitHub API `digest`）；框架组件上游直装按官方资产 digest 校验。`--no-verify` 可绕过（默认关闭，不建议）。
+- **框架组件上游直装**：metamod / css / swiftly / plugify / modsharp（含 win 版）在 prebuilt 模式下直接从各自官方 GitHub Release 下载（`source=upstream`），不再依赖 cs2-slim-features 发布包；metamod 自动取 CS2 版 prerelease（2.0.x）。
+- **GitHub 镜像加速**：国内网络可配置镜像，优先级 `--gh-proxy` > `slim.yaml gh_proxy` > 环境变量 `CS2_GH_PROXY`：
+
+  ```yaml
+  # slim.yaml
+  gh_proxy: https://gh-proxy.com
+  ```
+
+  ```bash
+  # 或命令行（覆盖 config）
+  cs2slim prebuilt --config slim.yaml --gh-proxy https://gh-proxy.com
+  # 或环境变量（兜底）
+  export CS2_GH_PROXY=https://gh-proxy.com
+  ```
+
+  镜像只改传输地址，内容不变，SHA256 校验仍生效。
+
 ## 与构建仓库的关系
 
 - 组件目录（`registry/`）由 [cs2-slim-replica](https://github.com/cyqmq/cs2-slim-replica) 维护，是本仓库的权威来源。
